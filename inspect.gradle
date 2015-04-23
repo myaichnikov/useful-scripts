@@ -1,0 +1,279 @@
+/**
+ * Одна из проверок была провалена?
+ */
+def failed = false
+
+/**
+ * Вызывает задачи проверки проектов:
+ * 1. projectStructureAnalyze
+ * 2. resourcesInSourceFolder
+ */
+task inspect(dependsOn: ['projectStructureAnalyze', 'resourcesInSourceFolder']) << {
+    if (failed) {
+        throw new RuntimeException("Project directory layout doesn't correspond to Standard Directory Layout. " +
+                "Or resource files are in source dir (must be in resource dir).")
+    }
+}
+
+/**
+ * Анализирует структуру папок проектов: соответствует ли она standard maven layout?
+ * Запуск: gradle projectStructureAnalyze или gradle inspect
+ * Результат работы: см. вывод в консоль.
+ */
+task projectStructureAnalyze() << {
+    def okLayout = new ArrayList();
+    def wrongLayout = new ArrayList();
+    def wrongRes = new ArrayList();
+
+    for (p in allprojects) {
+        def isWrong = false
+
+        /* Исходники */
+        def srcMainJava = new File(p.projectDir, 'src/main/java')
+        def src = new File(p.projectDir, 'src')
+        if (!srcMainJava.exists() && src.exists()) {
+            isWrong = true
+        }
+
+        /* Тесты */
+        def srcTestJava = new File(p.projectDir, 'src/test/java')
+        def test = new File(p.projectDir, 'test')
+        if (!srcTestJava.exists() && test.exists()) {
+            isWrong = true
+        }
+
+        /* Папка webapp */
+        def webXml = fileTree(p.projectDir) {
+            include '**/web.xml'
+        }
+        def webXmlExpected = new File(p.projectDir, "src/main/webapp/WEB-INF/web.xml")
+        if (!webXml.getFiles().isEmpty() && !webXmlExpected.exists()) {
+            isWrong = true
+        }
+
+        def srcResJava = new File(p.projectDir, 'src/main/resources')
+        def srcFailResJava = new File(p.projectDir, 'resources')
+
+        if (srcFailResJava.exists()) {
+            wrongRes.add(p)
+        }
+
+        if (isWrong) {
+            wrongLayout.add(p)
+        } else {
+            okLayout.add(p)
+        }
+    }
+
+    failed = failed || !wrongLayout.isEmpty()
+
+    println()
+    println('================ DIRECTORY LAYOUT ANALYZE RESULTS ================')
+    println("OK LAYOUT ($okLayout.size): " + writeProjectsToFile(okLayout, "LAYOUT_ok.txt").absolutePath)
+    println("WRONG LAYOUT ($wrongLayout.size): " + writeProjectsToFile(wrongLayout, "LAYOUT_wrong.txt").absolutePath)
+    println("WRONG RES ($wrongRes.size): " + writeProjectsToFile(wrongRes, "RES_wrong.txt").absolutePath)
+    println("TOTAL PROJECTS: ${wrongLayout.size + okLayout.size}")
+}
+
+/**
+ * Находит проекты, у которых в папках исходников и тестов есть ресурсные файлы (ресурсы должны лежать в отдельной папке).
+ * Запуск: gradle resourcesInSourceFolder или gradle inspect
+ * Результат работы: см. вывод в консоль.
+ */
+task resourcesInSourceFolder() << {
+    def ok = new ArrayList();
+    def wrongSrc = new ArrayList();
+    def wrongTest = new ArrayList();
+    def withoutSources = new ArrayList();
+
+    for (p in allprojects) {
+        if (p.hasProperty('sourceSets')
+                && (!p.sourceSets.main.java.srcDirs.isEmpty()
+                || !p.sourceSets.test.java.srcDirs.isEmpty())) {
+
+            def isWrongSrc = false;
+            for (File dir in p.sourceSets.main.java.srcDirs) {
+                def notJava = fileTree(dir) {
+                    exclude '**/*.java', '**/*.gitignore'
+                }
+                if (!notJava.getFiles().isEmpty()) {
+                    isWrongSrc = true
+                }
+            }
+
+            def isWrongTest = false;
+            for (File dir in p.sourceSets.test.java.srcDirs) {
+                def notJava = fileTree(dir) {
+                    exclude '**/*.java', '**/*.gitignore'
+                }
+                if (!notJava.getFiles().isEmpty()) {
+                    isWrongTest = true
+                }
+            }
+
+            if (isWrongSrc) {
+                wrongSrc.add(p)
+            }
+            if (isWrongTest) {
+                wrongTest.add(p)
+            }
+            if (!isWrongSrc && !isWrongTest) {
+                ok.add(p)
+            }
+        } else {
+            withoutSources.add(p)
+        }
+    }
+
+    failed = failed || !wrongSrc.isEmpty() || !wrongTest.isEmpty()
+
+    println()
+    println('================ RESOURSES IN SOURCE DIR RESULTS ================')
+    println("OK ($ok.size): " + writeProjectsToFile(ok, "RESOURCES_ok.txt").absolutePath)
+    println("WRONG SOURCES ($wrongSrc.size): " + writeProjectsToFile(wrongSrc, "RESOURCES_wrong_src.txt").absolutePath)
+    println("WRONG TEST ($wrongTest.size): " + writeProjectsToFile(wrongTest, "RESOURCES_wrong_test.txt").absolutePath)
+    println("WITHOUT SOURCES AND TESTS ($withoutSources.size): " + writeProjectsToFile(withoutSources, "RESOURCES_without_sources.txt").absolutePath)
+}
+
+/**
+ * Сохраняет коллекцию проектов Gradle (имена и пути) в файл.
+ */
+def File writeProjectsToFile(Collection projects, String fileName) {
+    File file = new File(buildDir, fileName)
+    if (!file.exists()) {
+        buildDir.mkdirs()
+        file.createNewFile()
+    }
+    file.withWriter { out ->
+        projects.each {
+            out.println(it.path)
+        }
+    }
+    return file;
+}
+
+task fixResourcesFolders() << {
+    for (p in allprojects) {
+
+        def srcMainJava = new File(p.projectDir, 'src/main/java')
+        def srcMainResources = new File(p.projectDir, 'src/main/resources')
+        def srcTestJava = new File(p.projectDir, 'src/test/java')
+
+        def src = new File(p.projectDir, 'src')
+        def test = new File(p.projectDir, 'test')
+
+        if (srcMainJava.exists()) {
+            def tree = fileTree(srcMainJava) {
+                exclude '**/*.java', '**/*.gitignore', '**/*templates*/*'
+            }
+            tree.files.each {
+                File f ->
+                    println "Non-java file in src folder $f.absolutePath"
+                    def to = "$f.absolutePath".replace('src\\main\\java', 'src\\main\\resources')
+                    println "Moving \n      $f.absolutePath to\n      $to"
+                    new File(to).parentFile.mkdirs()
+                    exec({ commandLine = ["git", "mv", "$f.absolutePath", "$to"] })
+            }
+        }
+    }
+}
+
+task fixWebappFolders() << {
+    for (p in allprojects) {
+
+        def srcMainJava = new File(p.projectDir, 'src/main/java')
+        def srcMainWrongWebApp = new File(p.projectDir, 'src/main/java/main/webapp')
+        def srcMainWebApp = new File(p.projectDir, 'src/main/webapp')
+
+        def closure = {
+            File f ->
+                def to = "$f.absolutePath".replace('src\\main\\java\\main\\webapp', 'src\\main\\webapp')
+                println "Fixing bad webapp folder $f.absolutePath to $to"
+                new File(to).parentFile.mkdirs()
+                exec({ commandLine = ["git", "mv", "$f.absolutePath", "$to"] })
+        }
+        if (srcMainWrongWebApp.exists()) {
+            def tree = fileTree(srcMainJava)
+            tree.files.each closure
+        }
+    }
+}
+
+task fixProjectsToMavenStyle() << {
+//    def prj = [project(':SetRetail10_Commons:DataStructsModule')]
+
+    for (p in allprojects) {
+//    for (p in prj) {
+
+        def srcMainJava = new File(p.projectDir, 'src/main/java')
+        def srcTestJava = new File(p.projectDir, 'src/test/java')
+        def srcMainResources = new File(p.projectDir, 'src/main/resources')
+        def srcTestResources = new File(p.projectDir, 'src/test/resources')
+
+        def tempMainJava = new File(p.projectDir, 'srcTemp/main/java')
+        def tempTestJava = new File(p.projectDir, 'srcTemp/test/java')
+        def tempMainResources = new File(p.projectDir, 'srcTemp/main/resources')
+        def tempTestResources = new File(p.projectDir, 'srcTemp/test/resources')
+
+        def src = new File(p.projectDir, 'src')
+        def test = new File(p.projectDir, 'test')
+        def resources = new File(p.projectDir, 'resources')
+        def testResources = new File(p.projectDir, 'test-resources')
+        def temp = new File(p.projectDir, 'srcTemp')
+
+        //src
+        if (!srcMainJava.exists()) {
+            moveNice(src, tempMainJava)
+        }
+
+        //test
+        if (!srcTestJava.exists()) {
+            moveNice(test, tempTestJava)
+        }
+
+        //resources
+        if (!srcMainResources.exists()) {
+            moveNice(resources, tempMainResources)
+        }
+
+        //test-resources
+        if (!srcTestResources.exists()) {
+            moveNice(testResources, tempTestResources)
+        }
+
+        if (temp.exists()) {
+            exec({ commandLine = ["git", "mv", "$temp.absolutePath", "$src.absolutePath"] })
+        }
+
+        //move resources files and other stuff from src/main/java to src/main/resources
+        fileTree(srcMainJava).exclude('**/*.java').each { File f ->
+            def relative = srcMainJava.toPath().relativize(f.toPath())
+            def to = srcMainResources.toPath().resolve(relative)
+            println "bad file ${relative} in src/main/java"
+            gitMoveFile(to, f.toPath())
+        }
+    }
+}
+
+def gitMoveFile(to, from) {
+    to.toFile().mkdirs()
+    to.toFile().mkdir()
+
+//    println "Moving file from $from to $to"
+    exec({ commandLine = ["git", "mv", "$from", "$to"] })
+}
+
+def moveNice(File fromFile, File toFile) {
+    if (fromFile.exists() && fromFile.directory && (fromFile.list().length > 0)) {
+        println("About to rename " + fromFile + " to " + toFile)
+
+        toFile.absoluteFile.mkdirs();
+        toFile.absoluteFile.mkdir();
+
+        files(fromFile.listFiles()).each { File f ->
+            gitMoveFile(toFile.toPath(), f.toPath())
+        }
+
+        fromFile.deleteDir();
+    }
+}
